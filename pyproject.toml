@@ -1,0 +1,12 @@
+[project]
+name = "b2b-inventory-api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.141.1",
+    "pytest>=9.1.1",
+    "sqlalchemy>=2.0.54",
+    "streamlit>=1.64.0",
+]
