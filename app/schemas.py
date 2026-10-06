@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -85,3 +85,35 @@ class DashboardSummary(BaseModel):
     total_sales: Decimal
     low_stock_count: int
 
+class OrderImportResult(BaseModel):
+    total_rows: int
+    orders_created: int
+    products_created: int
+    customers_created: int
+
+class WeeklyPoint(BaseModel):
+    week_start: date
+    quantity: float
+
+class ProductForecast(BaseModel):
+    product_id: int
+    sku: str
+    name: str
+    model: str
+    backtest_wape: float | None
+    active_week_ratio: float
+    history: list[WeeklyPoint]
+    forecast: list[WeeklyPoint]
+
+class ExcludedProduct(BaseModel):
+    product_id: int
+    sku: str
+    name: str
+    active_week_ratio: float
+    reason: str
+
+class ForecastOverview(BaseModel):
+    weeks: int
+    min_active_week_ratio: float
+    forecasts: list[ProductForecast]
+    excluded: list[ExcludedProduct]

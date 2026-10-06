@@ -1,3 +1,5 @@
+from collections.abc import Iterable, Iterator
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -108,3 +110,52 @@ class DashboardRepository:
             "low_stock_count": low_stock_count,
         }
 
+def _chunks(values: list[str], size: int=500) -> Iterator[list[str]]:
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+class ImportRepository:
+    def get_customers_by_business_numbers(self, db: Session, business_numbers: Iterable[str]) -> dict[str, models.Customer]:
+        """사업자번호 목록으로 기존 거래처를 찾아주는 함수"""
+        found: dict[str, models.Customer] = {}
+        for chunk in _chunks(list(business_numbers)):
+            stmt = select(models.Customer).where(models.Customer.business_number.in_(chunk))
+            for customer in db.scalars(stmt):
+                found[customer.business_number] = customer
+        return found
+
+    def get_products_by_skus(self, db: Session, skus: Iterable[str]) -> dict[str, models.Product]:
+        """sku 목록으로 기존 상품을 찾아주는 함수"""
+        found: dict[str, models.Product] = {}
+        for chunk in _chunks(list(skus)):
+            stmt = select(models.Product).where(models.Product.sku.in_(chunk))
+            for product in db.scalars(stmt):
+                found[product.sku] = product
+        return found
+
+    def save_all(
+        self,
+        db: Session,
+        customers: list[models.Customer],
+        products: list[models.Product],
+        orders: list[models.Order]
+    ) -> None:
+        """새 거래처/상품/주문을 한 트랜잭션으로 저장 (하나라도 실패하면 전부 롤백)"""
+        try:
+            db.add_all(customers)
+            db.add_all(products)
+            db.add_all(orders)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+class ForecastRepository:
+    def order_lines(self, db: Session) -> list[tuple]:
+        """확정 주문의 (상품 id, 주문 시각, 수량) 행을 전부 가져온다."""
+        stmt = (
+            select(models.OrderItem.product_id, models.Order.ordered_at, models.OrderItem.quantity)
+            .join(models.Order, models.Order.id == models.OrderItem.order_id)
+            .where(models.Order.status == 'confirmed')
+        )
+        return [tuple(row) for row in db.execute(stmt).all()]
