@@ -16,7 +16,7 @@ from app.forecasting import (
     MIN_ACTIVE_WEEK_RATIO,
     MIN_HISTORY_WEEKS,
     DemandForecaster,
-    backtest_wape,
+    backtest_errors,
     split_eligible,
     weekly_sales,
 )
@@ -38,6 +38,7 @@ class _State:
     eligible: list                  # 예측 대상 상품 id
     forecaster: object              # 학습 끝난 모델 (예측 대상이 없으면 None)
     wape: pd.Series                 # 상품별 백테스트 WAPE
+    rmse: pd.Series                 # 상품별 백테스트 RMSE (주간 수량 단위, 안전재고 계산용)
     forecasts: dict = field(default_factory=dict)   # {weeks: 예측 표} 캐시
 
 class ForecastService:
@@ -67,14 +68,23 @@ class ForecastService:
                 return self._state
 
             eligible, ratio = split_eligible(weekly)
-            forecaster, wape = None, pd.Series(dtype=float)
+            forecaster = None
+            wape = rmse = pd.Series(dtype=float)
             if eligible:
                 weekly_eligible = weekly[eligible]
-                wape = backtest_wape(weekly_eligible)
+                errors = backtest_errors(weekly_eligible)
+                wape, rmse = errors['wape'], errors['rmse']
                 forecaster = DemandForecaster().fit(weekly_eligible)
 
-            self._state = _State(signature, weekly, ratio, eligible, forecaster, wape)
+            self._state = _State(signature, weekly, ratio, eligible, forecaster, wape, rmse)
             return self._state
+
+    def snapshot(self, db: Session, weeks: int) -> tuple[_State, pd.DataFrame | None]:
+        """다른 서비스(발주 추천 등)가 쓰는 공개 메서드: (학습 결과, 다음 weeks주 예측 표).
+        예측 대상 상품이 하나도 없으면 예측 표는 None."""
+        state = self._prepare(db)
+        table = self._forecast_table(state, weeks) if state.eligible else None
+        return state, table
 
     @staticmethod
     def _forecast_table(state: _State, weeks: int) -> pd.DataFrame:

@@ -168,15 +168,24 @@ class DemandForecaster:
 
         return pd.DataFrame(out).T
 
-def backtest_wape(weekly: pd.DataFrame, holdout_weeks: int=HOLDOUT_WEEKS) -> pd.Series:
+def backtest_errors(weekly: pd.DataFrame, holdout_weeks: int=HOLDOUT_WEEKS) -> pd.DataFrame:
     """
-    상품별 '다음 1주' 예측 오차(WAPE).
+    상품별 '다음 1주' 예측 오차.
     마지막 holdout_weeks주를 학습에서 빼고 맞혀본다.
+
+    열: wape (비율, 0.2 = 20% 틀림), rmse (주간 수량 단위 오차, 안전재고 계산에 사용)
     """
     forecaster = DemandForecaster().fit(weekly.iloc[:-holdout_weeks])
     table = build_table(weekly)
     test = table[table['week_start'] >= weekly.index[-holdout_weeks]].copy()
     test['pred'] = forecaster.predict_rows(test)
-    return pd.Series({
-        pid: wape(g['target'], g['pred']) for pid, g in test.groupby('product_id')
-    })
+
+    rows = {}
+    for pid, g in test.groupby('product_id'):
+        err = g['target'].to_numpy(dtype=float) - g['pred'].to_numpy(dtype=float)
+        rows[pid] = {'wape': wape(g['target'], g['pred']), 'rmse': float(np.sqrt(np.mean(err ** 2)))}
+    return pd.DataFrame.from_dict(rows, orient='index')
+
+def backtest_wape(weekly: pd.DataFrame, holdout_weeks: int=HOLDOUT_WEEKS) -> pd.Series:
+    """상품별 백테스트 WAPE만 필요할 때 (노트북 등 기존 코드 호환용)"""
+    return backtest_errors(weekly, holdout_weeks)['wape']

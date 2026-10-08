@@ -13,6 +13,7 @@
 - 더미 주문 데이터 생성기 (`dummy_orders.py`)
 - 주문 내역 CSV 일괄 적재 (`POST /imports/orders`)
 - 상품별 주간 수요예측 API (`GET /forecasts`, `GET /forecasts/products/{product_id}`)
+- 추천 발주량·예상 품절일 계산 API (`GET /replenishment`)
 - FastAPI TestClient 기반 정상·실패 테스트
 - FastAPI + PostgreSQL Docker Compose 실행
 
@@ -29,6 +30,8 @@ app/
 ├── import_service.py      # CSV 일괄 적재
 ├── forecasting.py         # 수요예측 계산 (pandas, scikit-learn)
 ├── forecast_service.py    # 예측 서비스 (조회, 학습 결과 캐시, 응답 변환)
+├── replenishment.py       # 발주 계산 (예상 품절일, 추천 발주량, 순수 계산 코드)
+├── replenishment_service.py  # 발주 추천 서비스 (예측 + 현재 재고 + 계산)
 ├── routers/
 └── main.py
 notebooks/
@@ -39,7 +42,7 @@ dummy_orders.py                    # 더미 주문 CSV 생성기
 
 `Router → Service → Repository → Database`로 책임을 분리했습니다.
 
-수요예측의 계산 로직(`forecasting.py`)은 DB와 FastAPI를 모르는 순수 계산 코드로 분리했습니다. 주문 데이터 표만 넣으면 예측값이 나오므로 DB 없이 노트북과 테스트에서 그대로 사용할 수 있습니다.
+수요예측의 계산 로직(`forecasting.py`)은 DB와 FastAPI를 모르는 순수 계산 코드로 분리했습니다. 주문 데이터 표만 넣으면 예측값이 나오므로 DB 없이 노트북과 테스트에서 그대로 사용할 수 있습니다. 발주 계산(`replenishment.py`)도 같은 방식으로, 재고와 일별 예상 수요만 넣으면 결과가 나옵니다.
 
 ## Docker 실행
 
@@ -208,11 +211,102 @@ uvicorn app.main:app --reload
 - 판매량이 적은 상품은 분모(실제 판매량 합)가 작아 WAPE가 크게 나옵니다. 제외 사유가 "주문이 불규칙해서"인지 "판매량이 적어서"인지는 완전히 구분하지 못했습니다.
 - 수요를 확정 주문 수량으로 봅니다. 재고 부족으로 거절된 주문은 기록에 남지 않아 실제 수요보다 적게 잡힐 수 있습니다.
 
+## 추천 발주량·예상 품절일
+
+수요예측 결과와 현재 재고를 합쳐서 "어떤 상품을, 언제까지, 얼마나 발주해야 하는지" 알려줍니다.
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `GET /replenishment` | 전체 상품의 예상 품절일과 추천 발주량. 급한 순서로 정렬해서 응답 |
+
+| 쿼리 | 설명 | 범위 / 기본값 |
+|---|---|---|
+| `lead_time_days` | 발주 후 입고까지 걸리는 일수(리드타임) | 0~28 / 7 |
+| `cover_days` | 이번 발주로 커버하고 싶은 일수 | 1~28 / 14 |
+| `service_level` | 품절을 피하고 싶은 확률 (안전재고 계산용) | 0.5~0.99 / 0.95 |
+| `needs_order_only` | `true`면 발주가 필요한 상품만 표시 | false |
+
+**응답 예시** (값은 예시)
+
+```json
+{
+  "as_of": "2026-10-08",
+  "lead_time_days": 7,
+  "cover_days": 14,
+  "service_level": 0.95,
+  "horizon_weeks": 8,
+  "items": [
+    {
+      "product_id": 10,
+      "sku": "P-010",
+      "name": "베어링 6204",
+      "method": "forecast",
+      "status": "urgent",
+      "current_stock": 300,
+      "stockout_date": "2026-10-10",
+      "order_by_date": "2026-10-08",
+      "recommended_qty": 2546,
+      "lead_time_demand": 738.0,
+      "safety_stock": 671.3,
+      "reorder_level": 1409.3,
+      "note": null
+    }
+  ]
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `status` | `urgent`: 리드타임 안에 품절될 것으로 예상 / `order_now`: 지금 발주해야 함 / `ok`: 여유 있음 |
+| `stockout_date` | 예상 품절일. `null`이면 예측 기간(최소 8주) 안에 품절되지 않음 |
+| `order_by_date` | 늦어도 이 날까지는 발주해야 하는 날짜. 이미 지났으면 오늘 날짜 |
+| `recommended_qty` | 추천 발주량 |
+| `reorder_level` | 재고가 이 값 밑으로 내려가면 발주해야 하는 기준선 |
+
+**오류 응답**
+
+| 상태 | 원인 |
+|---|---|
+| 409 | 주간 데이터가 26주 미만 (수요예측과 같은 조건) |
+| 422 | 쿼리 값이 허용 범위를 벗어남 |
+
+### 계산 방식
+
+1. **일별 수요**: 주간 예측량을 7로 나눠 오늘부터 하루씩 펼칩니다. 진행 중인 이번 주는 오늘 이후 남은 날만 반영합니다. 이미 지난 날의 판매는 현재 재고에 반영돼 있기 때문입니다.
+2. **예상 품절일**: 일별 수요를 누적해서 현재 재고만큼 쌓이는 날을 구합니다.
+3. **안전재고**: `z x 주간 예측 오차(RMSE) x √(리드타임 / 7)`. 오차는 수요예측의 백테스트 결과(마지막 8주)를 사용하고, z는 `service_level`에서 구합니다.
+4. **발주 기준선**: `리드타임 동안의 예상 수요 + 안전재고`. 재고가 이보다 적으면 발주가 필요합니다.
+5. **추천 발주량**: `(리드타임 + 커버 일수) 동안의 예상 수요 + 안전재고 - 현재 재고`를 올림한 값이며, 음수면 0입니다.
+6. **상태 판정**: 재고가 리드타임 동안의 예상 수요보다 적으면 `urgent`, 발주 기준선보다 적으면 `order_now`, 그 외에는 `ok`입니다.
+
+**예측 대상이 아닌 상품**은 기존 재주문 기준(`reorder_point`)으로만 판정합니다. 응답의 `method`가 `reorder_point`로 표시되고, 예상 품절일과 추천 발주량은 `null`입니다.
+
+### 사용 순서
+
+```bash
+python dummy_orders.py --days 365 --seed 42 --out data/dummy_orders.csv
+uvicorn app.main:app --reload
+# 1. Swagger UI(/docs)에서 POST /imports/orders 에 CSV 업로드
+# 2. GET /replenishment 실행 (Try it out -> Execute)
+```
+
+> CSV 적재는 새로 만들어지는 모든 상품의 재고를 `initial_stock` 하나로 똑같이 넣습니다. 판매량이 다른 상품들이 같은 재고로 시작하므로 대부분 `urgent`로 나올 수 있습니다. 결과를 확인할 때는 `PATCH /inventory/{product_id}`로 상품별 재고를 조정하세요.
+
+### 한계
+
+- 이미 발주해서 입고 대기 중인 물량은 기록하지 않아서, 같은 상품이 계속 추천될 수 있습니다.
+- 안전재고의 오차는 마지막 8주, 1주 앞 예측으로만 구한 값이라 흔들릴 수 있고, 먼 주의 오차는 과소평가됩니다. 예측 오차가 큰 상품은 안전재고도 크게 나옵니다.
+- 하루 수요를 7등분해서 계산하므로 평일 중심 주문 패턴은 반영하지 않습니다.
+- 예상 품절일은 예측 기간(최소 8주) 안에서만 찾고, 2주 이상 앞의 예측은 정확도가 낮아집니다.
+- 리드타임은 모든 상품에 같은 값을 쓰며, 요청 시 쿼리로만 지정할 수 있습니다.
+
 ## 테스트
 
 ```bash
 pytest -q
 ```
+
+`tests/test_api.py`는 상품·주문·대시보드 API를, `tests/test_replenishment.py`는 발주 계산 함수(DB 없이)와 `/replenishment` API를 검증합니다. 예측 서비스는 학습 결과를 메모리에 캐시하므로, `conftest.py`가 테스트마다 캐시를 비웁니다.
 
 ## 다음 개발 순서
 
@@ -220,6 +314,6 @@ pytest -q
 - [ ] JWT 로그인과 관리자·영업담당자 권한 분리
 - [ ] 거래처별 RFM 등급 및 이탈위험 점수
 - [x] 상품별 주간 수요예측 API
-- [ ] 추천 발주량과 예상 품절일 계산 (수요예측 결과 활용)
+- [x] 추천 발주량과 예상 품절일 계산 (수요예측 결과 활용)
 - [ ] Streamlit 운영 대시보드 연결
 

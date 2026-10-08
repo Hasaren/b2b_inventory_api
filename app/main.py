@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import Base, engine
-from app.routers import customers, dashboard, inventory, orders, products, imports, forecasts
+from app.routers import customers, dashboard, inventory, orders, products, imports, forecasts, replenishment
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ app.include_router(orders.router)
 app.include_router(dashboard.router)
 app.include_router(imports.router)
 app.include_router(forecasts.router)
+app.include_router(replenishment.router)
 
 
 @app.get("/health", tags=["system"])

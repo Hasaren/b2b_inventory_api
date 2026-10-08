@@ -117,3 +117,26 @@ class ForecastOverview(BaseModel):
     min_active_week_ratio: float
     forecasts: list[ProductForecast]
     excluded: list[ExcludedProduct]
+
+class ReplenishmentItem(BaseModel):
+    product_id: int
+    sku: str
+    name: str
+    method: str                        # 'forecast'(수요예측 기반) | 'reorder_point'(예측 대상이 아니라 재주문 기준으로 판단)
+    status: str                        # 'urgent'(리드타임 안에 품절 예상) | 'order_now'(지금 발주) | 'ok'
+    current_stock: int
+    stockout_date: date | None         # 예상 품절일. None이면 예측 기간 안에 품절되지 않음(또는 계산 불가)
+    order_by_date: date | None         # 늦어도 이 날까지는 발주해야 하는 날짜
+    recommended_qty: int | None        # 추천 발주량. 예측 대상이 아니면 None
+    lead_time_demand: float | None     # 리드타임 동안 예상 수요
+    safety_stock: float | None
+    reorder_level: float | None        # 이 재고 밑으로 내려가면 발주 (리드타임 수요 + 안전재고)
+    note: str | None = None
+
+class ReplenishmentOverview(BaseModel):
+    as_of: date
+    lead_time_days: int
+    cover_days: int
+    service_level: float
+    horizon_weeks: int
+    items: list[ReplenishmentItem]
